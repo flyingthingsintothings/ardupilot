@@ -71,15 +71,39 @@ AP_GPS_SBF::AP_GPS_SBF(AP_GPS &_gps,
     // if we ever parse RTK observations it will always be of type NED, so set it once
     state.rtk_baseline_coords_type = RTK_BASELINE_COORDINATE_SYSTEM_NED;
 
-    // yaw available when option bit set or using dual antenna
-    if (option_set(AP_GPS::DriverOptions::SBF_UseBaseForYaw) ||
-        (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA)) {
+    // yaw available when option bit set or using moving base/dual-antenna
+    if (option_set(AP_GPS::DriverOptions::SBF_UseBaseForYaw)) {
         state.gps_yaw_configured = true;
+    }
+
+    switch (get_type()) {
+#if GPS_MOVING_BASELINE
+    case AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_BASE: {
+        rtcm3_parser = new RTCM3_Parser;
+        if (!rtcm3_parser) {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "SBF %d: failed RTCMv3 parser allocation", state.instance + 1);
+        }
+        break;
+    }
+#endif // GPS_MOVING_BASELINE
+    case AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA:
+    case AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_ROVER: {
+        state.gps_yaw_configured = true;
+        break;
+    }
+    default: {
+        break;
+    }
     }
 }
 
 AP_GPS_SBF::~AP_GPS_SBF (void) {
     free(config_string);
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser) {
+        delete rtcm3_parser;
+    }
+#endif // GPS_MOVING_BASELINE
 }
 
 // Process all bytes available from the stream
@@ -112,7 +136,7 @@ AP_GPS_SBF::read(void)
                 } else if (readyForCommand) {
                     if (config_string == nullptr) {
                         switch (config_step) {
-                            case Config_State::Baud_Rate:
+                            case Config_State::Baud_Rate: {
                                 if (asprintf(&config_string, "scs,COM%d,baud%d,bits8,No,bit1,%s\n",
                                              (int)params.com_port,
                                              230400,
@@ -120,16 +144,19 @@ AP_GPS_SBF::read(void)
                                     config_string = nullptr;
                                 }
                                 break;
-                            case Config_State::SSO:
+                            }
+                            case Config_State::SSO: {
                                 const char *extra_config;
                                 switch (get_type()) {
                                     case AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA:
+                                    case AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_ROVER: {
                                         extra_config = "+AttCovEuler+AuxAntPositions";
                                         break;
-                                    case AP_GPS::GPS_Type::GPS_TYPE_SBF:
-                                    default:
+                                    }
+                                    default: {
                                         extra_config = "";
                                         break;
+                                    }
                                 }
                                 if (asprintf(&config_string, "sso,Stream%d,COM%d,PVTGeodetic+DOP+ReceiverStatus+VelCovGeodetic+BaseVectorGeod%s,msec100\n",
                                              (int)GPS_SBF_STREAM_NUMBER,
@@ -137,13 +164,66 @@ AP_GPS_SBF::read(void)
                                              extra_config) == -1) {
                                     config_string = nullptr;
                                 }
+                                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS %hhu SBF: SSO finished", state.instance);
                                 break;
-                            case Config_State::Blob:
-                                if (asprintf(&config_string, "%s\n", _initialisation_blob[_init_blob_index]) == -1) {
+                            }
+                            case Config_State::SDIO: {
+#if GPS_MOVING_BASELINE
+                                switch (get_type()) {
+                                case AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_BASE: {
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS %hhu SBF: Enabling RTCMv3 output", state.instance);
+                                    if (asprintf(&config_string, "sdio,COM%d,Auto,+RTCMv3\n", (int)params.com_port) == -1) {
+                                        config_string = nullptr;
+                                    }
+                                    break;
+                                }
+                                default: {
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS %hhu SBF: Enabling SBF output", state.instance);
+                                    if (asprintf(&config_string, "sdio,COM%d,Auto,+SBF\n", (int)params.com_port) == -1) {
+                                        config_string = nullptr;
+                                    }
+                                    break;
+                                }
+                                }
+#else
+                                if (asprintf(&config_string, "sdio,COM%d,Auto,+SBF\n", (int)params.com_port) == -1) {
+                                    config_string = nullptr;
+                                }
+#endif // GPS_MOVING_BASE
+                                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "GPS %hhu SBF: SDIO finished", state.instance);
+                                break;
+                            }
+                            case Config_State::SGA:
+                            {
+                                const char *targetGA;
+
+                                switch (get_type()) {
+                                case AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA: {
+                                    targetGA = "MultiAntenna";
+                                    break;
+                                }
+                                case AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_ROVER: {
+                                    targetGA = "MovingBase";
+                                    break;
+                                }
+                                default: {
+                                    targetGA = "none";
+                                    break;
+                                }
+                                }
+                                if (asprintf(&config_string, "sga, %s\n", targetGA) == -1) {
                                     config_string = nullptr;
                                 }
                                 break;
-                            case Config_State::SBAS:
+                            }
+                            case Config_State::Blob: {
+                                if (asprintf(&config_string, "%s\n", _initialisation_blob[_init_blob_index]) == -1) {
+                                    config_string = nullptr;
+                                }
+                                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Configured initialization blob");
+                                break;
+                            }
+                            case Config_State::SBAS: {
                                 switch ((AP_GPS::SBAS_Mode)gps._sbas_mode) {
                                     case AP_GPS::SBAS_Mode::Disabled:
                                         if (asprintf(&config_string, "%s\n", sbas_off) == -1) {
@@ -161,21 +241,12 @@ AP_GPS_SBF::read(void)
                                         break;
                                 }
                                 break;
-                            case Config_State::SGA:
-                            {
-                                const char *targetGA = "none";
-                                if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA) {
-                                    targetGA = "MultiAntenna";
-                                }
-                                if (asprintf(&config_string, "sga, %s\n", targetGA)) {
-                                  config_string = nullptr;
-                                }
-                                break;
                             }
-                            case Config_State::Complete:
+                            case Config_State::Complete: {
                               // should never reach here, why search for a config if we have fully configured already
                               INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
                               break;
+                            }
                         }
                     }
 
@@ -226,6 +297,12 @@ bool AP_GPS_SBF::logging_healthy(void) const
 bool
 AP_GPS_SBF::parse(uint8_t temp)
 {
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser && rtcm3_parser->read(temp)) {
+        sbf_msg.sbf_state = sbf_msg_parser_t::PREAMBLE1;
+        return false;
+    }
+#endif
     switch (sbf_msg.sbf_state)
     {
         default:
@@ -315,6 +392,12 @@ AP_GPS_SBF::parse(uint8_t temp)
             }
             sbf_msg.read++;
             if (sbf_msg.read >= (sbf_msg.length - 8)) {
+#if GPS_MOVING_BASELINE
+                if (rtcm3_parser) {
+                    // it's definitely an SBF message, so reset the RTCMv3 parser
+                    rtcm3_parser->reset();
+                }
+#endif // GPS_MOVING_BASELINE
                 if (sbf_msg.read > sizeof(sbf_msg.data)) {
                     // not interested in these large messages
                     sbf_msg.sbf_state = sbf_msg_parser_t::PREAMBLE1;
@@ -339,7 +422,7 @@ AP_GPS_SBF::parse(uint8_t temp)
                 sbf_msg.data.bytes[sbf_msg.read] = temp;
             } else {
                 // we don't have enough buffer to compare the commands
-                // most probable cause is that a user injected a longer command then
+                // most probable cause is that a user injected a longer command than
                 // we have buffer for, or it could be a corruption, either way we
                 // simply ignore the result
                 sbf_msg.sbf_state = sbf_msg_parser_t::PREAMBLE1;
@@ -361,12 +444,23 @@ AP_GPS_SBF::parse(uint8_t temp)
                             config_string = nullptr;
                             switch (config_step) {
                                 case Config_State::Baud_Rate:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found Baud_Rate");
                                     config_step = Config_State::SSO;
                                     break;
                                 case Config_State::SSO:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found SSO");
+                                    config_step = Config_State::SGA;
+                                    break;
+                                case Config_State::SGA:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found SGA");
+                                    config_step = Config_State::SDIO;
+                                    break;
+                                case Config_State::SDIO:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found SDIO");
                                     config_step = Config_State::Blob;
                                     break;
                                 case Config_State::Blob:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found Blob");
                                     _init_blob_index++;
                                     if (_init_blob_index >= ARRAY_SIZE(_initialisation_blob)) {
                                         config_step = Config_State::SBAS;
@@ -374,14 +468,12 @@ AP_GPS_SBF::parse(uint8_t temp)
                                     }
                                     break;
                                 case Config_State::SBAS:
+                                    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SBF: Found SBAS");
                                     _init_blob_index++;
                                     if ((gps._sbas_mode == AP_GPS::SBAS_Mode::Disabled)
                                         ||_init_blob_index >= ARRAY_SIZE(sbas_on_blob)) {
-                                        config_step = Config_State::SGA;
+                                        config_step = Config_State::Complete;
                                     }
-                                    break;
-                                case Config_State::SGA:
-                                    config_step = Config_State::Complete;
                                     break;
                                 case Config_State::Complete:
                                     // should never reach here, this implies that we validated a config string when we hadn't sent any
@@ -541,7 +633,7 @@ AP_GPS_SBF::process_message(void)
     {
         // yaw accuracy is taken from this message even though we actually calculate the yaw ourself (see AuxAntPositions below)
         // this is OK based on the assumption that the calculation methods are similar and that inaccuracy arises from the sensor readings
-        if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA) {
+        if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA || get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_ROVER) {
             const msg5939 &temp = sbf_msg.data.msg5939u;
 
             check_new_itow(temp.TOW, sbf_msg.length);
@@ -566,7 +658,7 @@ AP_GPS_SBF::process_message(void)
     case AuxAntPositions:
     {
 #if GPS_MOVING_BASELINE
-        if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA) {
+        if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_DUAL_ANTENNA || get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_ROVER) {
             // calculate yaw using reported antenna positions in earth-frame
             // note that this calculation does not correct for the vehicle's roll and pitch meaning it is inaccurate at very high lean angles
             const msg5942 &temp = sbf_msg.data.msg5942u;
@@ -657,7 +749,36 @@ bool AP_GPS_SBF::is_configured (void) const {
             (config_step == Config_State::Complete));
 }
 
+// support for retrieving RTCMv3 data from a moving baseline base
+bool AP_GPS_SBF::get_RTCMV3(const uint8_t *&bytes, uint16_t &len)
+{
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser) {
+        len = rtcm3_parser->get_len(bytes);
+        return len > 0;
+    }
+#endif
+    return false;
+}
+
+// clear previous RTCM3 packet
+void AP_GPS_SBF::clear_RTCMV3(void)
+{
+#if GPS_MOVING_BASELINE
+    if (rtcm3_parser) {
+        rtcm3_parser->clear_packet();
+    }
+#endif
+}
+
 bool AP_GPS_SBF::is_healthy (void) const {
+#if GPS_MOVING_BASELINE
+    if (get_type() == AP_GPS::GPS_Type::GPS_TYPE_SBF_RTK_BASE && rtcm3_parser == nullptr) {
+        // we haven't initialised RTCMv3 parser
+        return false;
+    }
+#endif
+
     return (RxError & RX_ERROR_MASK) == 0;
 }
 

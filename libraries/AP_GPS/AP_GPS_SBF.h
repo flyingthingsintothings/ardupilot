@@ -21,6 +21,7 @@
 
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
+#include "RTCM3_Parser.h"
 
 #if AP_GPS_SBF_ENABLED
 
@@ -40,6 +41,10 @@ public:
     bool read() override;
 
     const char *name() const override { return "SBF"; }
+
+    // support for retrieving RTCMv3 data from a moving baseline base
+    bool get_RTCMV3(const uint8_t *&bytes, uint16_t &len) override;
+    void clear_RTCMV3(void) override;
 
     bool is_configured (void) const override;
 
@@ -73,6 +78,7 @@ private:
     enum class Config_State {
         Baud_Rate,
         SSO,
+        SDIO,
         Blob,
         SBAS,
         SGA,
@@ -307,5 +313,9 @@ private:
     char portIdentifier[5];
     uint8_t portLength;
     bool readyForCommand;
+
+#if GPS_MOVING_BASELINE
+    RTCM3_Parser *rtcm3_parser {nullptr};
+#endif // GPS_MOVING_BASELINE
 };
-#endif
+#endif // AP_GPS_SBF_ENABLED

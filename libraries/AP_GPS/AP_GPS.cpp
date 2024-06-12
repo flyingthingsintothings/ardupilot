@@ -544,6 +544,8 @@ void AP_GPS::send_blob_start(uint8_t instance)
 #if AP_GPS_SBF_ENABLED
     case GPS_TYPE_SBF:
     case GPS_TYPE_SBF_DUAL_ANTENNA:
+    case GPS_TYPE_SBF_RTK_BASE:
+    case GPS_TYPE_SBF_RTK_ROVER:
 #endif //AP_GPS_SBF_ENABLED
 #if AP_GPS_GSOF_ENABLED
     case GPS_TYPE_GSOF:
@@ -712,6 +714,8 @@ AP_GPS_Backend *AP_GPS::_detect_instance(uint8_t instance)
     // by default the sbf/trimble gps outputs no data on its port, until configured.
     case GPS_TYPE_SBF:
     case GPS_TYPE_SBF_DUAL_ANTENNA:
+    case GPS_TYPE_SBF_RTK_BASE:
+    case GPS_TYPE_SBF_RTK_ROVER:
         return new AP_GPS_SBF(*this, params[instance], state[instance], _port[instance]);
 #endif //AP_GPS_SBF_ENABLED
 #if AP_GPS_NOVA_ENABLED
@@ -923,21 +927,8 @@ void AP_GPS::update_instance(uint8_t instance)
     }
 
 #if GPS_MAX_RECEIVERS > 1
-    if (drivers[instance] && type == GPS_TYPE_UBLOX_RTK_BASE) {
-        // see if a moving baseline base has some RTCMv3 data
-        // which we need to pass along to the rover
-        const uint8_t *rtcm_data;
-        uint16_t rtcm_len;
-        if (drivers[instance]->get_RTCMV3(rtcm_data, rtcm_len)) {
-            for (uint8_t i=0; i< GPS_MAX_RECEIVERS; i++) {
-                if (i != instance && params[i].type == GPS_TYPE_UBLOX_RTK_ROVER) {
-                    // pass the data to the rover
-                    inject_data(i, rtcm_data, rtcm_len);
-                    drivers[instance]->clear_RTCMV3();
-                    break;
-                }
-            }
-        }
+    if (provides_moving_base_corrections(instance)) {
+        forward_moving_base_corrections(instance);
     }
 #endif
 
@@ -978,6 +969,42 @@ void AP_GPS::update_instance(uint8_t instance)
 #endif
 }
 
+/*
+  check whether receiver managed by driver `instance` is expected to provide RTCM corrections
+*/
+bool AP_GPS::provides_moving_base_corrections(uint8_t instance) const
+{
+    const auto driver_type = params[instance].type;
+    return driver_type == GPS_TYPE_UBLOX_RTK_BASE || driver_type == GPS_TYPE_SBF_RTK_BASE;
+}
+
+/*
+  check whether receiver managed by driver `instance` accepts moving base RTCM corrections
+*/
+bool AP_GPS::accepts_moving_base_corrections(uint8_t instance) const
+{
+    const auto driver_type = params[instance].type;
+    return driver_type == GPS_TYPE_UBLOX_RTK_ROVER || driver_type == GPS_TYPE_SBF_RTK_ROVER;
+}
+
+/*
+  check if driver `instance` has any moving base RTCMv3 corrections and if so, forward them to the other instances if they accept them
+*/
+void AP_GPS::forward_moving_base_corrections(uint8_t instance)
+{
+    const uint8_t *rtcm_data;
+    uint16_t rtcm_len;
+    if (drivers[instance] && drivers[instance]->get_RTCMV3(rtcm_data, rtcm_len)) {
+        for (uint8_t i = 0; i < GPS_MAX_RECEIVERS; i++) {
+            if (i != instance && accepts_moving_base_corrections(i)) {
+                // pass the data to the rover
+                inject_data(i, rtcm_data, rtcm_len);
+                drivers[instance]->clear_RTCMV3();
+                break;
+            }
+        }
+    }
+}
 
 #if GPS_MOVING_BASELINE
 bool AP_GPS::get_RelPosHeading(uint32_t &timestamp, float &relPosHeading, float &relPosLength, float &relPosD, float &accHeading)
@@ -1998,7 +2025,7 @@ bool AP_GPS::gps_yaw_deg(uint8_t instance, float &yaw_deg, float &accuracy_deg, 
     // @Param: _TYPE
     // @DisplayName: 1st GPS type
     // @Description: GPS type of 1st GPS
-    // @Values: 0:None,1:AUTO,2:uBlox,5:NMEA,6:SiRF,7:HIL,8:SwiftNav,9:DroneCAN,10:SBF,11:GSOF,13:ERB,14:MAV,15:NOVA,16:HemisphereNMEA,17:uBlox-MovingBaseline-Base,18:uBlox-MovingBaseline-Rover,19:MSP,20:AllyStar,21:ExternalAHRS,22:DroneCAN-MovingBaseline-Base,23:DroneCAN-MovingBaseline-Rover,24:UnicoreNMEA,25:UnicoreMovingBaselineNMEA,26:SBF-DualAntenna
+    // @Values: 0:None,1:AUTO,2:uBlox,5:NMEA,6:SiRF,7:HIL,8:SwiftNav,9:DroneCAN,10:SBF,11:GSOF,13:ERB,14:MAV,15:NOVA,16:HemisphereNMEA,17:uBlox-MovingBaseline-Base,18:uBlox-MovingBaseline-Rover,19:MSP,20:AllyStar,21:ExternalAHRS,22:DroneCAN-MovingBaseline-Base,23:DroneCAN-MovingBaseline-Rover,24:UnicoreNMEA,25:UnicoreMovingBaselineNMEA,26:SBF-DualAntenna,27:SBF-MovingBaseline-Base,28,SBF-MovingBaseline-Rover
     // @RebootRequired: True
     // @User: Advanced
 

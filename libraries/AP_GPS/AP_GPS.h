@@ -111,6 +111,8 @@ public:
         GPS_TYPE_UNICORE_NMEA = 24,
         GPS_TYPE_UNICORE_MOVINGBASE_NMEA = 25,
         GPS_TYPE_SBF_DUAL_ANTENNA = 26,
+        GPS_TYPE_SBF_RTK_BASE = 27,
+        GPS_TYPE_SBF_RTK_ROVER = 28,
 #if HAL_SIM_GPS_ENABLED
         GPS_TYPE_SITL = 100,
 #endif
@@ -721,6 +723,15 @@ private:
     AP_GPS_Backend *_detect_instance(uint8_t instance);
 
     void update_instance(uint8_t instance);
+
+    // check whether receiver managed by driver `instance` is expected to provide RTCM corrections
+    bool provides_moving_base_corrections(uint8_t instance) const;
+
+    // check whether receiver managed by driver `instance` accepts moving base RTCM corrections
+    bool accepts_moving_base_corrections(uint8_t instace) const;
+
+    // check if driver `instance` has any moving base RTCMv3 corrections and if so, forward them to the other instances if they accept them
+    void forward_moving_base_corrections(uint8_t instance);
 
     /*
       buffer for re-assembling RTCM data for GPS injection.
